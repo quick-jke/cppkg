@@ -1,0 +1,5 @@
+*.o
+*.log
+cmake-build*/
+build/
+.vscode/
