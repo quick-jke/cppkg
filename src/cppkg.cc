@@ -8,6 +8,7 @@
 #include "init.hpp"
 #include "add.hpp"
 #include "build.hpp"
+#include "run.hpp"
 
 namespace fs = std::filesystem;
 
@@ -52,6 +53,9 @@ int main(int argc, char* argv[]) {
     auto build_cmd = app.add_subcommand("build", "Build the project")
         ->alias("compile");
 
+    auto run_cmd = app.add_subcommand("run", "Run the project")
+        ->alias("start");
+
     try {
         app.parse(argc, argv);
     } catch (const CLI::ParseError& e) {
@@ -71,6 +75,9 @@ int main(int argc, char* argv[]) {
             handler.execute();
         } else if (app.got_subcommand(build_cmd)) {
             BuildHandler handler;
+            handler.execute();
+        } else if (app.got_subcommand(run_cmd)){
+            RunHandler handler;
             handler.execute();
         } else {
             std::cout << app.help();

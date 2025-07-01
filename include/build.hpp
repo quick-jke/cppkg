@@ -2,8 +2,10 @@
 #define QUICK_CPPKG_BUILD_HPP
 
 #include "command.hpp"
+#include "dependency.hpp"
 #include <iostream>
 #include <filesystem>
+#include <fstream>
 #include <vector>
 #include <cstdlib>
 #include <unordered_map>
@@ -16,6 +18,14 @@ class BuildHandler : public CommandHandler {
 public:
     BuildHandler() : config_(json::parse(std::ifstream("cppkg.json"))){}
     void execute() override {
+        if (!fs::exists("_packages")) {
+            try {
+                fs::create_directory("_packages");
+            } catch (const fs::filesystem_error& e) {
+                std::cerr << "Error: " << e.what() << '\n';
+            }
+        }
+        
         std::cout << "🚀 Starting build process...\n";
 
         if (!checkProjectStructure()) {
@@ -29,7 +39,7 @@ public:
             return;
         }
 
-        std::string build_cmd = buildCompilationCommand(compiler);
+        std::string build_cmd = buildCompilationCommand(compiler, config_["name"].get<std::string>(), config_["exec"].get<std::string>(), getDependencies());
         
         std::cout << "🔧 Running build command: " << build_cmd << "\n";
         
@@ -84,46 +94,75 @@ private:
         return "";
     }
 
-    std::string buildCompilationCommand(const std::string& compiler) {
+    std::vector<Dependency> getDependencies() {
+        return {
+            {
+                "fmt", "9.0.0",
+                "_packages/fmt/9.0.0/include",
+                "_packages/fmt/9.0.0/lib/libfmt.a",
+                "static"
+            }
+        };
+    }
+
+    std::string buildCompilationCommand(
+        const std::string& compiler,
+        const std::string& name,
+        const std::string& exec,
+        const std::vector<Dependency>& dependencies
+    ) {
+        std::string cmd;
+
         if (compiler == "cl") {
             // Windows (MSVC)
-            return compiler + 
-                  " /std:" + config_["cpp_version"].get<std::string>() +
-                  " /EHsc /Iinclude /Fobuild/ /Febuild/" + config_["name"].get<std::string>() + " " + config_["exec"].get<std::string>();
-        } else {
-            // Linux/macOS (g++/clang++)
-            std::string cmd = compiler + 
-                            " -std=" + config_["cpp_version"].get<std::string>() +
-                            " -Iinclude -o build/" + config_["name"].get<std::string>() + " " + config_["exec"].get<std::string>();
-            
-            auto dependencies = getDependencies();
-            if (!dependencies.empty()) {
-                cmd += " " + dependencies;
+            cmd = compiler + 
+                " /std:c++17" +
+                " /EHsc";
+
+            // Добавляем пути к заголовкам
+            for (const auto& dep : dependencies) {
+                if (!dep.include_path.empty()) {
+                    cmd += " /I" + dep.include_path;
+                }
             }
-            
-            return cmd;
+
+            cmd += " /Fobuild/ /Febuild/" + name + " " + exec;
+
+            // Добавляем статические библиотеки
+            for (const auto& dep : dependencies) {
+                if (dep.type == "static" && !dep.library_path.empty()) {
+                    cmd += " " + dep.library_path;
+                }
+            }
+
+        } else {
+            // Linux/macOS (g++, clang++)
+            cmd = compiler + 
+                " -std=c++17" +
+                " -Iinclude";
+
+            // Добавляем пути к заголовкам
+            for (const auto& dep : dependencies) {
+                if (!dep.include_path.empty()) {
+                    cmd += " -I" + dep.include_path;
+                }
+            }
+
+            cmd += " -o build/" + name + " " + exec;
+
+            // Добавляем линковку статических библиотек
+            for (const auto& dep : dependencies) {
+                if (dep.type == "static" && !dep.library_path.empty()) {
+                    cmd += " " + dep.library_path;
+                }
+            }
         }
+
+        return cmd;
     }
 
-    std::string getDependencies() {
-        // Здесь должна быть логика чтения зависимостей из cppkg.json
-        // и формирования соответствующих флагов компиляции
-        // Это заглушка для примера
-        // return "-Lvendor/lib -lboost -lssl";  // Пример использования библиотек
-        return "";  // Пример использования библиотек
-    }
 
-    std::string getConfigValue(const std::string& key, const std::string& default_value) {
-        // Здесь должна быть реализация чтения значений из cppkg.json
-        // Это заглушка для примера
-        static std::unordered_map<std::string, std::string> config = {
-            {"cpp_version", "17"},
-            {"name", "my_project"}
-        };
-        
-        auto it = config.find(key);
-        return (it != config.end()) ? it->second : default_value;
-    }
+    
 
     void showCompilerInstallInstructions() {
         std::cerr << "❌ Compiler not found. Please install one of the following:\n";
