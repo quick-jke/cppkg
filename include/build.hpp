@@ -1,6 +1,15 @@
 #ifndef QUICK_CPPKG_BUILD_HPP
 #define QUICK_CPPKG_BUILD_HPP
 
+#define RESET   "\033[0m"
+#define RED     "\033[31m"
+#define GREEN   "\033[32m"
+#define YELLOW  "\033[33m"
+#define BLUE    "\033[34m"
+#define MAGENTA "\033[35m"
+#define CYAN    "\033[36m"
+#define GREY    "\033[90m"
+
 #include "command.hpp"
 #include "dependency.hpp"
 #include <iostream>
@@ -10,6 +19,7 @@
 #include <cstdlib>
 #include <unordered_map>
 #include "nlohmann/json.hpp"
+#include <unordered_set>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -23,35 +33,75 @@ public:
                 fs::create_directory("_packages");
             } catch (const fs::filesystem_error& e) {
                 std::cerr << "Error: " << e.what() << '\n';
+                return;
             }
         }
-        
-        std::cout << "🚀 Starting build process...\n";
+
+        std::cout << YELLOW << "🚀 Starting build process..." << RESET << std::endl;
 
         if (!checkProjectStructure()) {
-            std::cerr << "❌ Project structure is invalid. Missing required files/directories.\n";
+            std::cerr << RED << "❌ Project structure is invalid. Missing required files/directories." << RESET << std::endl;
             return;
         }
 
-        std::string compiler = findCompiler();
-        if (compiler.empty()) {
-            showCompilerInstallInstructions();
-            return;
-        }
+        std::string build_cmd = buildCompilationCommand();
 
-        std::string build_cmd = buildCompilationCommand(compiler, config_["name"].get<std::string>(), config_["exec"].get<std::string>(), getDependencies());
-        
-        std::cout << "🔧 Running build command: " << build_cmd << "\n";
-        
+        std::cout << "🔧 Running build command:\n" << build_cmd << RESET << std::endl;
+
         int result = system(build_cmd.c_str());
         if (result == 0) {
-            std::cout << "✅ Build successful! Executable created in build/ directory\n";
+            std::cout << GREEN << "✅ Build successful! Executable created in build/ directory" << RESET << std::endl;
         } else {
-            std::cerr << "❌ Build failed with error code: " << result << "\n";
+            std::cerr << RED << "❌ Build failed with error code: " << result << RESET << std::endl;
         }
     }
 
 private:
+    json config_;
+
+    std::vector<std::string> findHeaderDirectories() {
+        std::unordered_set<std::string> header_dirs;
+
+        const std::unordered_set<std::string> header_extensions = { ".h", ".hpp", ".hh", ".hxx" };
+
+        for (const auto& entry : fs::recursive_directory_iterator(".")) {
+            if (entry.is_regular_file()) {
+                std::string ext = entry.path().extension().string();
+
+                if (header_extensions.count(ext)) {
+                    std::string dir = entry.path().parent_path().string();
+                    header_dirs.insert(dir);
+                }
+            }
+        }
+
+        return {header_dirs.begin(), header_dirs.end()};
+    }
+
+    std::vector<std::string> getSourceFiles() {
+        std::vector<std::string> sources;
+
+        if (config_.contains("sources") && config_["sources"].is_array()) {
+            for (const auto& s : config_["sources"]) {
+                if (fs::exists(s.get<std::string>())) {
+                    sources.push_back(s.get<std::string>());
+                }
+            }
+
+        } else {
+            for (const auto& entry : fs::recursive_directory_iterator(".")) {
+                if (entry.path().extension() == ".cpp" &&
+                    entry.path().parent_path() != "build" &&
+                    entry.path().parent_path() != "_packages") {
+
+                    sources.push_back(entry.path().string());
+                }
+            }
+        }
+        
+        return sources;
+    }
+    
     bool checkProjectStructure() {
         if (!fs::exists(config_["exec"])) {
             std::cerr << "❌ Missing source file\n";
@@ -105,55 +155,74 @@ private:
         };
     }
 
-    std::string buildCompilationCommand(
-        const std::string& compiler,
-        const std::string& name,
-        const std::string& exec,
-        const std::vector<Dependency>& dependencies
-    ) {
+    std::string buildCompilationCommand() {
+        auto compiler = findCompiler();
+        if (compiler.empty()) {
+            throw std::runtime_error(getCompilerInstallInstructions());
+        }
+        auto source_files = getSourceFiles();
+        if (source_files.empty()) {
+            throw std::runtime_error(RED + std::string("❌ No source files found to compile") + RESET + "\n");
+        }
         std::string cmd;
+        auto cpp_version = config_["cpp_version"].get<std::string>();
+        auto name = config_["name"].get<std::string>();
+        std::vector<std::string> include_paths = findHeaderDirectories();
+        auto dependencies = getDependencies();
 
         if (compiler == "cl") {
             // Windows (MSVC)
             cmd = compiler + 
-                " /std:c++17" +
-                " /EHsc";
+                " /std:" + cpp_version +
+                " /EHsc /nologo";
 
-            // Добавляем пути к заголовкам
+            for (const auto& path : include_paths) {
+                cmd += " /I\"" + path + "\"";
+            }
+
             for (const auto& dep : dependencies) {
                 if (!dep.include_path.empty()) {
-                    cmd += " /I" + dep.include_path;
+                    cmd += " /I\"" + dep.include_path + "\"";
                 }
             }
 
-            cmd += " /Fobuild/ /Febuild/" + name + " " + exec;
+            cmd += " /Fobuild/ /Febuild/" + name;
 
-            // Добавляем статические библиотеки
+            for (const auto& src : source_files) {
+                cmd += " \"" + src + "\"";
+            }
+
             for (const auto& dep : dependencies) {
                 if (dep.type == "static" && !dep.library_path.empty()) {
-                    cmd += " " + dep.library_path;
+                    cmd += " \"" + dep.library_path + "\"";
                 }
             }
 
         } else {
-            // Linux/macOS (g++, clang++)
+            // Linux/macOS (g++/clang++)
             cmd = compiler + 
-                " -std=c++17" +
-                " -Iinclude";
+                " -std=" + cpp_version +
+                " -Wall -Wextra -pedantic";
 
-            // Добавляем пути к заголовкам
+            for (const auto& path : include_paths) {
+                cmd += " -I\"" + path + "\"";
+            }
+
             for (const auto& dep : dependencies) {
                 if (!dep.include_path.empty()) {
-                    cmd += " -I" + dep.include_path;
+                    cmd += " -I\"" + dep.include_path + "\"";
                 }
             }
 
-            cmd += " -o build/" + name + " " + exec;
+            cmd += " -o build/" + name;
 
-            // Добавляем линковку статических библиотек
+            for (const auto& src : source_files) {
+                cmd += " \"" + src + "\"";
+            }
+
             for (const auto& dep : dependencies) {
-                if (dep.type == "static" && !dep.library_path.empty()) {
-                    cmd += " " + dep.library_path;
+                if ((dep.type == "static" || dep.type == "shared") && !dep.library_path.empty()) {
+                    cmd += " \"" + dep.library_path + "\"";
                 }
             }
         }
@@ -161,27 +230,28 @@ private:
         return cmd;
     }
 
-
-    
-
-    void showCompilerInstallInstructions() {
-        std::cerr << "❌ Compiler not found. Please install one of the following:\n";
+    std::string getCompilerInstallInstructions() {
+        std::stringstream oss;
+        oss << RED << "❌ Compiler not found. Please install one of the following:" << RESET << std::endl;
         
         #ifdef _WIN32
-            std::cerr << "1. Visual Studio Build Tools (https://visualstudio.microsoft.com/visual-cpp-build-tools/ )\n";
-            std::cerr << "2. MinGW-w64 (https://mingw-w64.org/doku.php )\n";
+            oss << YELLOW << "1. Visual Studio Build Tools (https://visualstudio.microsoft.com/visual-cpp-build-tools/ )\n2. MinGW-w64 (https://mingw-w64.org/doku.php )" << RESET << std::endl;
         #elif __linux__
-            std::cerr << "1. GCC: sudo apt install g++\n";
-            std::cerr << "2. Clang: sudo apt install clang\n";
+            oss << YELLOW << "1. GCC: sudo apt install g++\n2. Clang: sudo apt install clang" << RESET << std::endl;
         #elif __APPLE__
-            std::cerr << "1. Xcode Command Line Tools: xcode-select --install\n";
+            oss << YELLOW << "1. Xcode Command Line Tools: xcode-select --install" << RESET << std::endl;
         #endif
+        return oss.str();
     }
 
-    json config_;
+    bool needsRebuild(const std::string& source, const std::string& object) {
+        if (!fs::exists(object)) return true;
 
+        auto src_time = fs::last_write_time(source);
+        auto obj_time = fs::last_write_time(object);
 
-
+        return src_time > obj_time;
+    }
 };
 
 #endif
